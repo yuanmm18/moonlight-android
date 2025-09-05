@@ -36,6 +36,7 @@ import android.os.SystemClock;
 import android.util.Range;
 import android.view.Choreographer;
 import android.view.SurfaceHolder;
+import com.limelight.LeiaHelper;
 
 public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements Choreographer.FrameCallback {
 
@@ -1043,7 +1044,43 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             }
         });
     }
+// Leia 3D detection - perform analysis every 30 frames
+if (leiaHelper != null && frameSkipCount++ >= 30) {
+    frameSkipCount = 0;
 
+    try {
+        // Create bitmap for frame analysis
+        Bitmap frameBitmap = Bitmap.createBitmap(256, 144, Bitmap.Config.ARGB_8888);
+
+        // Read current frame from OpenGL surface
+        ByteBuffer pixelBuffer = ByteBuffer.allocateDirect(256 * 144 * 4);
+        GLES10.glReadPixels(0, 0, 256, 144, GLES10.GL_RGBA, GLES10.GL_UNSIGNED_BYTE, pixelBuffer);
+        frameBitmap.copyPixelsFromBuffer(pixelBuffer);
+
+        // Split frame into left and right halves
+        int halfWidth = 256 / 2;
+        Bitmap leftHalf  = Bitmap.createBitmap(frameBitmap, 0, 0, halfWidth, 144);
+        Bitmap rightHalf = Bitmap.createBitmap(frameBitmap, halfWidth, 0, halfWidth, 144);
+
+        // Check if this is a side-by-side 3D frame
+        boolean isSBS = leiaHelper.isSBS(leftHalf, rightHalf);
+
+        // Update 3D state if changed
+        if (isSBS != last3DState) {
+            LeiaHelper.set3DMode(isSBS);
+            last3DState = isSBS;
+        }
+
+        // Cleanup
+        leftHalf.recycle();
+        rightHalf.recycle();
+        frameBitmap.recycle();
+
+    } catch (Exception e) {
+        LimeLog.warning("Leia 3D detection failed: " + e.getMessage());
+        // Continue in 2D mode if detection fails
+    }
+}
     private void startRendererThread()
     {
         rendererThread = new Thread() {
@@ -1967,6 +2004,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             str += originalException.toString();
 
             return str;
+            
         }
     }
 }

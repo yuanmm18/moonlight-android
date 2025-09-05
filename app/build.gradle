@@ -1,6 +1,13 @@
 apply plugin: 'com.android.application'
 
 android {
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.18.1"
+        }
+    }
+}
     ndkVersion "27.0.12077973"
 
     compileSdk 34
@@ -16,12 +23,6 @@ android {
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'
-        externalNativeBuild {
-    cmake {
-        path "src/main/cpp/CMakeLists.txt"
-        version "3.18.1"
-    }
-}
     }
 
     flavorDimensions.add("root")

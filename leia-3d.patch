@@ -1,0 +1,437 @@
+● diff --git a/app/src/main/java/com/limelight/LeiaHelper.java
+  b/app/src/main/java/com/limelight/LeiaHelper.java
+  new file mode 100644
+  index 000000000..e69de29bb
+  --- /dev/null
+  +++ b/app/src/main/java/com/limelight/LeiaHelper.java
+  @@ -0,0 +1,49 @@
+  +package com.limelight;
+  +
+  +import android.graphics.Bitmap;
+  +import android.util.Log;
+  +
+  +public class LeiaHelper {
+  +    private static final String TAG = "LeiaHelper";
+  +    private static boolean leiaLibraryLoaded = false;
+  +    private static boolean leiaAvailable = false;
+  +    private static boolean current3DState = false;
+  +
+  +    static {
+  +        try {
+  +            System.loadLibrary("leia_jni");
+  +            leiaLibraryLoaded = true;
+  +            leiaAvailable = true;
+  +            Log.i(TAG, "Leia library loaded successfully");
+  +        } catch (UnsatisfiedLinkError e) {
+  +            Log.w(TAG, "Leia library not available: " + e.getMessage());
+  +            leiaLibraryLoaded = false;
+  +            leiaAvailable = false;
+  +        }
+  +    }
+  +
+  +    public static boolean isLeiaAvailable() {
+  +        return leiaAvailable;
+  +    }
+  +
+  +    public native boolean isSBS(Bitmap leftHalf, Bitmap rightHalf);
+  +
+  +    public native void set3D(boolean on, int mode);
+  +
+  +    public static void set3DMode(boolean enable3D) {
+  +        if (!leiaAvailable) {
+  +            return;
+  +        }
+  +
+  +        if (enable3D != current3DState) {
+  +            LeiaHelper helper = new LeiaHelper();
+  +            helper.set3D(enable3D, enable3D ? 1 : 0);
+  +            current3DState = enable3D;
+  +        }
+  +    }
+  +
+  +    public static boolean is3DEnabled() {
+  +        return current3DState;
+  +    }
+  +}
+  diff --git a/app/src/main/jni/leia_jni.cpp b/app/src/main/jni/leia_jni.cpp
+  new file mode 100644
+  index 000000000..e69de29bb
+  --- /dev/null
+  +++ b/app/src/main/jni/leia_jni.cpp
+  @@ -0,0 +1,201 @@
+  +#include <jni.h>
+  +#include <android/log.h>
+  +#include <android/bitmap.h>
+  +#include <arm_neon.h>
+  +#include <dlfcn.h>
+  +#include <math.h>
+  +#include <string.h>
+  +
+  +#define TAG "LeiaJNI"
+  +#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+  +#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+  +
+  +// Function pointers for Leia library
+  +typedef void (*leiaSet3DOn_func)(int mode);
+  +typedef void (*leiaSet3DOff_func)();
+  +
+  +static leiaSet3DOn_func leiaSet3DOn = nullptr;
+  +static leiaSet3DOff_func leiaSet3DOff = nullptr;
+  +static void* leiaLibHandle = nullptr;
+  +static bool current3DState = false;
+  +
+  +// Load Leia library and get function pointers
+  +static bool loadLeiaLibrary() {
+  +    if (leiaLibHandle != nullptr) {
+  +        return true;
+  +    }
+  +
+  +    leiaLibHandle = dlopen("liblibleia.so", RTLD_LAZY);
+  +    if (!leiaLibHandle) {
+  +        LOGE("Failed to load Leia library: %s", dlerror());
+  +        return false;
+  +    }
+  +
+  +    leiaSet3DOn = (leiaSet3DOn_func)dlsym(leiaLibHandle, "leiaSet3DOn");
+  +    leiaSet3DOff = (leiaSet3DOff_func)dlsym(leiaLibHandle, "leiaSet3DOff");
+  +
+  +    if (!leiaSet3DOn || !leiaSet3DOff) {
+  +        LOGE("Failed to get Leia function pointers");
+  +        dlclose(leiaLibHandle);
+  +        leiaLibHandle = nullptr;
+  +        return false;
+  +    }
+  +
+  +    LOGI("Leia library loaded successfully");
+  +    return true;
+  +}
+  +
+  +// Fast SAD (Sum of Absolute Differences) calculation using NEON
+  +static float calculateSAD_NEON(const uint8_t* left, const uint8_t* right, int width,
+  int height) {
+  +    int totalPixels = width * height;
+  +    int totalSAD = 0;
+  +
+  +    // Process 64 pixels at a time using NEON
+  +    int simdPixels = totalPixels & ~63;
+  +
+  +    for (int i = 0; i < simdPixels; i += 64) {
+  +        uint8x16_t left1 = vld1q_u8(left + i);
+  +        uint8x16_t right1 = vld1q_u8(right + i);
+  +        uint8x16_t diff1 = vabdq_u8(left1, right1);
+  +
+  +        uint8x16_t left2 = vld1q_u8(left + i + 16);
+  +        uint8x16_t right2 = vld1q_u8(right + i + 16);
+  +        uint8x16_t diff2 = vabdq_u8(left2, right2);
+  +
+  +        uint8x16_t left3 = vld1q_u8(left + i + 32);
+  +        uint8x16_t right3 = vld1q_u8(right + i + 32);
+  +        uint8x16_t diff3 = vabdq_u8(left3, right3);
+  +
+  +        uint8x16_t left4 = vld1q_u8(left + i + 48);
+  +        uint8x16_t right4 = vld1q_u8(right + i + 48);
+  +        uint8x16_t diff4 = vabdq_u8(left4, right4);
+  +
+  +        // Sum the differences
+  +        uint16x8_t sum1 = vpaddlq_u8(diff1);
+  +        uint16x8_t sum2 = vpaddlq_u8(diff2);
+  +        uint16x8_t sum3 = vpaddlq_u8(diff3);
+  +        uint16x8_t sum4 = vpaddlq_u8(diff4);
+  +
+  +        uint16x8_t total_sum = vaddq_u16(vaddq_u16(sum1, sum2), vaddq_u16(sum3, sum4));
+  +        uint32x4_t final_sum = vpaddlq_u16(total_sum);
+  +        uint64x2_t final_sum64 = vpaddlq_u32(final_sum);
+  +
+  +        totalSAD += vgetq_lane_s64(vreinterpretq_s64_u64(final_sum64), 0);
+  +    }
+  +
+  +    // Handle remaining pixels
+  +    for (int i = simdPixels; i < totalPixels; i++) {
+  +        totalSAD += abs(left[i] - right[i]);
+  +    }
+  +
+  +    return (float)totalSAD / (255.0f * totalPixels);
+  +}
+  +
+  +// Downsample bitmap to 64x64 grayscale
+  +static void downsampleToGrayScale(AndroidBitmapInfo* leftInfo, AndroidBitmapInfo*
+  rightInfo,
+  +                                 const uint8_t* leftPixels, const uint8_t* rightPixels,
+  +                                 uint8_t* leftGray, uint8_t* rightGray,
+  +                                 int targetWidth, int targetHeight) {
+  +    float scaleX = (float)leftInfo->width / targetWidth;
+  +    float scaleY = (float)leftInfo->height / targetHeight;
+  +
+  +    for (int y = 0; y < targetHeight; y++) {
+  +        for (int x = 0; x < targetWidth; x++) {
+  +            int srcX = (int)(x * scaleX);
+  +            int srcY = (int)(y * scaleY);
+  +
+  +            int leftOffset = (srcY * leftInfo->width + srcX) * 4;
+  +            int rightOffset = (srcY * rightInfo->width + srcX) * 4;
+  +
+  +            // Convert RGBA to grayscale using luminance formula
+  +            uint8_t leftR = leftPixels[leftOffset];
+  +            uint8_t leftG = leftPixels[leftOffset + 1];
+  +            uint8_t leftB = leftPixels[leftOffset + 2];
+  +            leftGray[y * targetWidth + x] = (uint8_t)(0.299f * leftR + 0.587f * leftG +
+   0.114f * leftB);
+  +
+  +            uint8_t rightR = rightPixels[rightOffset];
+  +            uint8_t rightG = rightPixels[rightOffset + 1];
+  +            uint8_t rightB = rightPixels[rightOffset + 2];
+  +            rightGray[y * targetWidth + x] = (uint8_t)(0.299f * rightR + 0.587f *
+  rightG + 0.114f * rightB);
+  +        }
+  +    }
+  +}
+  +
+  +extern "C" {
+  +
+  +JNIEXPORT jboolean JNICALL
+  +Java_com_limelight_LeiaHelper_isSBS(JNIEnv *env, jobject obj, jobject leftHalf, jobject
+   rightHalf) {
+  +    AndroidBitmapInfo leftInfo, rightInfo;
+  +    uint8_t* leftPixels = nullptr;
+  +    uint8_t* rightPixels = nullptr;
+  +    jboolean result = JNI_FALSE;
+  +
+  +    // Get bitmap info
+  +    if (AndroidBitmap_getInfo(env, leftHalf, &leftInfo) !=
+  ANDROID_BITMAP_RESULT_SUCCESS ||
+  +        AndroidBitmap_getInfo(env, rightHalf, &rightInfo) !=
+  ANDROID_BITMAP_RESULT_SUCCESS) {
+  +        LOGE("Failed to get bitmap info");
+  +        return JNI_FALSE;
+  +    }
+  +
+  +    // Lock bitmaps
+  +    if (AndroidBitmap_lockPixels(env, leftHalf, (void**)&leftPixels) !=
+  ANDROID_BITMAP_RESULT_SUCCESS ||
+  +        AndroidBitmap_lockPixels(env, rightHalf, (void**)&rightPixels) !=
+  ANDROID_BITMAP_RESULT_SUCCESS) {
+  +        LOGE("Failed to lock bitmap pixels");
+  +        return JNI_FALSE;
+  +    }
+  +
+  +    // Allocate buffers for downsampled grayscale images
+  +    const int targetWidth = 64;
+  +    const int targetHeight = 64;
+  +    uint8_t* leftGray = new uint8_t[targetWidth * targetHeight];
+  +    uint8_t* rightGray = new uint8_t[targetWidth * targetHeight];
+  +
+  +    // Downsample and convert to grayscale
+  +    downsampleToGrayScale(&leftInfo, &rightInfo, leftPixels, rightPixels,
+  +                         leftGray, rightGray, targetWidth, targetHeight);
+  +
+  +    // Calculate SAD correlation
+  +    float sadValue = calculateSAD_NEON(leftGray, rightGray, targetWidth, targetHeight);
+  +    float correlation = 1.0f - sadValue;
+  +
+  +    // Determine if SBS based on correlation threshold
+  +    result = (correlation < 0.95f) ? JNI_TRUE : JNI_FALSE;
+  +
+  +    LOGI("SBS detection: correlation=%.3f, threshold=0.950, result=%s",
+  +         correlation, result ? "SBS" : "2D");
+  +
+  +    // Cleanup
+  +    delete[] leftGray;
+  +    delete[] rightGray;
+  +    AndroidBitmap_unlockPixels(env, leftHalf);
+  +    AndroidBitmap_unlockPixels(env, rightHalf);
+  +
+  +    return result;
+  +}
+  +
+  +JNIEXPORT void JNICALL
+  +Java_com_limelight_LeiaHelper_set3D(JNIEnv *env, jobject obj, jboolean on, jint mode) {
+  +    if (!loadLeiaLibrary()) {
+  +        LOGE("Leia library not available");
+  +        return;
+  +    }
+  +
+  +    if (on && current3DState != on) {
+  +        leiaSet3DOn(mode);
+  +        current3DState = true;
+  +        LOGI("Leia: 3D ON (mode=%d)", mode);
+  +    } else if (!on && current3DState != on) {
+  +        leiaSet3DOff();
+  +        current3DState = false;
+  +        LOGI("Leia: 3D OFF");
+  +    }
+  +}
+  +
+  +} // extern "C"
+  diff --git a/app/src/main/jni/leia_stub.cpp b/app/src/main/jni/leia_stub.cpp
+  new file mode 100644
+  index 000000000..e69de29bb
+  --- /dev/null
+  +++ b/app/src/main/jni/leia_stub.cpp
+  @@ -0,0 +1,23 @@
+  +// Stub implementation for non-arm64 architectures
+  +#include <jni.h>
+  +#include <android/log.h>
+  +
+  +#define TAG "LeiaStub"
+  +#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+  +
+  +extern "C" {
+  +
+  +JNIEXPORT jboolean JNICALL
+  +Java_com_limelight_LeiaHelper_isSBS(JNIEnv *env, jobject obj, jobject leftHalf, jobject
+   rightHalf) {
+  +    LOGI("Leia stub: isSBS called on unsupported architecture");
+  +    return JNI_FALSE;
+  +}
+  +
+  +JNIEXPORT void JNICALL
+  +Java_com_limelight_LeiaHelper_set3D(JNIEnv *env, jobject obj, jboolean on, jint mode) {
+  +    LOGI("Leia stub: set3D called on unsupported architecture");
+  +}
+  +
+  +} // extern "C"
+  diff --git a/app/src/main/jni/leia_jni.mk b/app/src/main/jni/leia_jni.mk
+  new file mode 100644
+  index 000000000..e69de29bb
+  --- /dev/null
+  +++ b/app/src/main/jni/leia_jni.mk
+  @@ -0,0 +1,23 @@
+  +# Android.mk for Leia JNI library
+  +
+  +LOCAL_PATH := $(call my-dir)
+  +
+  +include $(CLEAR_VARS)
+  +
+  +LOCAL_MODULE    := leia_jni
+  +LOCAL_SRC_FILES := leia_jni.cpp
+  +
+  +LOCAL_C_INCLUDES := $(LOCAL_PATH)
+  +
+  +LOCAL_CFLAGS := -fvisibility=hidden -DHAVE_NEON=1
+  +LOCAL_CPPFLAGS := -std=c++11 -fno-exceptions -fno-rtti
+  +
+  +LOCAL_LDLIBS := -llog -ldl
+  +
+  +# Only build for arm64-v8a
+  +ifeq ($(TARGET_ARCH_ABI),arm64-v8a)
+  +    # Link against system libleia.so
+  +    LOCAL_LDFLAGS := -L$(TARGET_OUT)/lib64 -llibleia
+  +    include $(BUILD_SHARED_LIBRARY)
+  +else
+  +    # Build a stub for other architectures
+  +    LOCAL_SRC_FILES += leia_stub.cpp
+  +    include $(BUILD_SHARED_LIBRARY)
+  +endif
+  diff --git a/app/src/main/jni/Android.mk b/app/src/main/jni/Android.mk
+  index 8f9b8c1f2..d3a7b5c3e 100644
+  --- a/app/src/main/jni/Android.mk
+  +++ b/app/src/main/jni/Android.mk
+  @@ -1,2 +1,3 @@
+   include $(call all-subdir-makefiles)
+  +include $(LOCAL_PATH)/leia_jni.mk
+  diff --git
+  a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+  b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+  index abc123def..456789abc 100644
+  --- a/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+  +++ b/app/src/main/java/com/limelight/binding/video/MediaCodecDecoderRenderer.java
+  @@ -23,6 +23,8 @@ import com.limelight.nvstream.av.video.VideoDecoderRenderer;
+   import com.limelight.nvstream.jni.MoonBridge;
+   import com.limelight.preferences.PreferenceConfiguration;
+
+  +import com.limelight.LeiaHelper;
+  +
+   import android.annotation.TargetApi;
+   import android.app.Activity;
+   import android.content.Context;
+  @@ -32,6 +34,7 @@ import android.media.MediaCodec.BufferInfo;
+   import android.graphics.Bitmap;
+   import android.graphics.Canvas;
+   import android.opengl.GLES10;
+  +import java.nio.ByteBuffer;
+   import android.media.MediaCodec.CodecException;
+   import android.os.Build;
+   import android.os.Handler;
+  @@ -89,6 +92,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer
+  implements Ch
+       private boolean foreground = true;
+       private PerfOverlayListener perfListener;
+
+  +    // Leia 3D detection
+  +    private LeiaHelper leiaHelper;
+  +    private boolean last3DState = false;
+  +    private int frameSkipCount = 0;
+  +    private static final int FRAME_SKIP_THRESHOLD = 30; // Check 3D every 30 frames
+  +    private static final int ANALYSIS_WIDTH = 256;
+  +    private static final int ANALYSIS_HEIGHT = 144;
+  +
+       private static final int CR_MAX_TRIES = 10;
+       private static final int CR_RECOVERY_TYPE_NONE = 0;
+       private static final int CR_RECOVERY_TYPE_FLUSH = 1;
+  @@ -722,6 +732,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer
+   implements Ch
+           this.initialWidth = width;
+           this.initialHeight = height;
+           this.videoFormat = format;
+  +
+  +        // Initialize Leia helper for 3D detection
+  +        if (LeiaHelper.isLeiaAvailable()) {
+  +            leiaHelper = new LeiaHelper();
+  +        }
+           this.refreshRate = redrawRate;
+
+           return initializeDecoder(false);
+  @@ -1024,6 +1038,44 @@ public class MediaCodecDecoderRenderer extends
+  VideoDecoderRenderer implements Ch
+                       lastRenderedFrameTimeNanos = frameTimeNanos;
+                       activeWindowVideoStats.totalFramesRendered++;
+
+  +                    // Leia 3D detection - perform analysis every FRAME_SKIP_THRESHOLD
+  frames
+  +                    if (leiaHelper != null && frameSkipCount++ >= FRAME_SKIP_THRESHOLD)
+   {
+  +                        frameSkipCount = 0;
+  +
+  +                        try {
+  +                            // Create bitmap for frame analysis
+  +                            Bitmap frameBitmap = Bitmap.createBitmap(ANALYSIS_WIDTH,
+  ANALYSIS_HEIGHT, Bitmap.Config.ARGB_8888);
+  +
+  +                            // Read current frame from OpenGL surface
+  +                            ByteBuffer pixelBuffer =
+  ByteBuffer.allocateDirect(ANALYSIS_WIDTH * ANALYSIS_HEIGHT * 4);
+  +                            GLES10.glReadPixels(0, 0, ANALYSIS_WIDTH, ANALYSIS_HEIGHT,
+  GLES10.GL_RGBA, GLES10.GL_UNSIGNED_BYTE, pixelBuffer);
+  +                            frameBitmap.copyPixelsFromBuffer(pixelBuffer);
+  +
+  +                            // Split frame into left and right halves
+  +                            int halfWidth = ANALYSIS_WIDTH / 2;
+  +                            Bitmap leftHalf = Bitmap.createBitmap(frameBitmap, 0, 0,
+  halfWidth, ANALYSIS_HEIGHT);
+  +                            Bitmap rightHalf = Bitmap.createBitmap(frameBitmap,
+  halfWidth, 0, halfWidth, ANALYSIS_HEIGHT);
+  +
+  +                            // Check if this is a side-by-side 3D frame
+  +                            boolean isSBS = leiaHelper.isSBS(leftHalf, rightHalf);
+  +
+  +                            // Update 3D state if changed
+  +                            if (isSBS != last3DState) {
+  +                                LeiaHelper.set3DMode(isSBS);
+  +                                last3DState = isSBS;
+  +                            }
+  +
+  +                            // Cleanup
+  +                            leftHalf.recycle();
+  +                            rightHalf.recycle();
+  +                            frameBitmap.recycle();
+  +
+  +                        } catch (Exception e) {
+  +                            LimeLog.warning("Leia 3D detection failed: " +
+  e.getMessage());
+  +                            // Continue in 2D mode if detection fails
+  +                        }
+  +                    }
+                   } catch (IllegalStateException ignored) {
+                       try {
+                           // Try to avoid leaking the output buffer by releasing it
+  without rendering
